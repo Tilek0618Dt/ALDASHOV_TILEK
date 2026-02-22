@@ -1,1 +1,1 @@
-
+COUNTRIES = ["Kyrgyzstan", "Kazakhstan", "Uzbekistan"]
