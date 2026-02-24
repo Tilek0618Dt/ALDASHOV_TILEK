@@ -1,10 +1,10 @@
-from future import annotations
+from __future__ import annotations
 
 import asyncio
 import datetime as dt
 import logging
 from contextlib import suppress
-from typing import Optional
+from typing import Optional, Callable, Awaitable
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
@@ -41,7 +41,7 @@ log = logging.getLogger("tilek_ai")
 # =========================================================
 # FastAPI app
 # =========================================================
-app = FastAPI(title="Tilek AI", version="1.0.0")
+app = FastAPI(title="Tilek AI", version="1.1.0")
 
 
 @app.get("/health")
@@ -74,7 +74,7 @@ _cron_task: Optional[asyncio.Task] = None
 async def _db_init():
     """
     Create tables if they don't exist.
-    (Алгачкы MVP үчүн ушундай. Кийин Alembic миграция кошобуз.)
+    MVP үчүн create_all. Кийин Alembic миграция кошобуз.
     """
     log.info("DB init: creating tables (if not exist)...")
     async with ENGINE.begin() as conn:
@@ -91,13 +91,28 @@ async def _cron_loop():
     - free daily reset
     - unblock users
     - monthly refill
+    Optionally: notify users (ex: plan expired, unblocked, etc.)
     """
     log.info("Cron loop started ✅")
+
+    async def notify(tg_id: int, text: str) -> None:
+        try:
+            await bot.send_message(tg_id, text)
+        except Exception:
+            # колдонуучу ботту блоктосо ж.б — унчукпай өткөрөбүз
+            pass
+
     while True:
         try:
+            # Сенин scheduler.py notify параметрин кабыл алса — эң жакшы
+            # Эгер кабыл албаса да, төмөнкүдөй try/except бузбайт.
+            await ensure_resets(notify=notify)  # type: ignore
+        except TypeError:
+            # ensure_resets(notify=...) жок болсо — fallback
             await ensure_resets()
         except Exception as e:
             log.warning("Cron loop error: %s", e)
+
         await asyncio.sleep(60)
 
 
@@ -127,8 +142,8 @@ async def on_startup():
     await _db_init()
 
     global _polling_task, _cron_task
-    _cron_task = asyncio.create_task(_cron_loop())
-    _polling_task = asyncio.create_task(_polling_loop())
+    _cron_task = asyncio.create_task(_cron_loop(), name="tilek_cron_loop")
+    _polling_task = asyncio.create_task(_polling_loop(), name="tilek_polling_loop")
 
     log.info("Tilek AI started 🎉")
 
@@ -140,13 +155,13 @@ async def on_shutdown():
     # stop polling
     if _polling_task:
         _polling_task.cancel()
-        with suppress(Exception):
+        with suppress(asyncio.CancelledError):
             await _polling_task
 
-# stop cron
+    # stop cron
     if _cron_task:
         _cron_task.cancel()
-        with suppress(Exception):
+        with suppress(asyncio.CancelledError):
             await _cron_task
 
     # close bot session
@@ -181,12 +196,10 @@ async def _ref_reward(session, buyer: User, paid_amount: float):
     ref_user.ref_balance_usd += float(REF_BONUS_USD)
 
     if paid_amount >= float(REF_FREE_PLUS_MIN_PAID_USD):
-        # grant 7 days PLUS
         p = PLANS["PLUS"]
         ref_user.plan = "PLUS"
         ref_user.plan_until = utcnow() + dt.timedelta(days=int(REF_FREE_PLUS_DAYS))
 
-        # If user had no limits, give initial bundle
         if (ref_user.chat_left or 0) <= 0 and (ref_user.video_left or 0) <= 0:
             ref_user.chat_left = p.monthly_chat
             ref_user.video_left = p.monthly_video
@@ -220,6 +233,8 @@ async def cryptomus_webhook(req: Request):
 
     order_id = data.get("order_id") or data.get("orderId") or data.get("orderid")
     status = (data.get("status") or data.get("payment_status") or data.get("paymentStatus") or "").lower()
+
+    # Cryptomus статустар ар кандай болушу мүмкүн
     paid = status in ("paid", "paid_over", "paid_partial", "success")
 
     if not order_id:
@@ -230,15 +245,14 @@ async def cryptomus_webhook(req: Request):
             inv_res = await s.execute(select(Invoice).where(Invoice.order_id == str(order_id)))
             inv = inv_res.scalar_one_or_none()
             if not inv:
-                # unknown order, ignore
                 return {"ok": True}
 
-            # Already paid? ignore duplicates
+            # duplicate webhook => ignore
             if inv.status == "paid":
                 return {"ok": True}
 
+            # If not paid - store status and stop
             if not paid:
-                # you can store failed status too
                 inv.status = status or "failed"
                 await s.commit()
                 return {"ok": True}
@@ -251,7 +265,6 @@ async def cryptomus_webhook(req: Request):
             u_res = await s.execute(select(User).where(User.tg_id == inv.tg_id))
             u = u_res.scalar_one_or_none()
             if not u:
-                # user may be missing if purchased before /start
                 u = User(tg_id=inv.tg_id)
                 s.add(u)
                 await s.flush()
@@ -272,7 +285,6 @@ async def cryptomus_webhook(req: Request):
                 with suppress(Exception):
                     await bot.send_message(u.tg_id, "✅ PLUS актив болду! 😎💎")
 
-                # referral reward only for PLUS
                 paid_amount = float(data.get("amount") or inv.amount_usd or 0.0)
                 await _ref_reward(s, u, paid_amount=paid_amount)
 
@@ -292,36 +304,31 @@ async def cryptomus_webhook(req: Request):
                     await bot.send_message(u.tg_id, "✅ PRO актив болду! 😈🔴")
 
             elif inv.kind.startswith("VIP_VIDEO_"):
-                # kind example: VIP_VIDEO_3
                 try:
                     n = int(inv.kind.split("_")[-1])
                 except Exception:
                     n = 0
                 u.vip_video_credits += max(0, n)
-
                 with suppress(Exception):
                     await bot.send_message(u.tg_id, f"✅ VIP VIDEO кредит кошулду: +{n} 🎥")
 
             elif inv.kind.startswith("VIP_MUSIC_"):
-                # kind example: VIP_MUSIC_5
                 try:
                     minutes = int(inv.kind.split("_")[-1])
                 except Exception:
                     minutes = 0
                 u.vip_music_minutes += max(0, minutes)
-
                 with suppress(Exception):
                     await bot.send_message(u.tg_id, f"✅ VIP MUSIC минут кошулду: +{minutes} мин 🪉")
 
             else:
-                # unknown kind - just save paid invoice
                 log.warning("Paid invoice with unknown kind=%s", inv.kind)
 
             await s.commit()
 
     except SQLAlchemyError as e:
         log.exception("DB error in webhook: %s", e)
-        # Return ok to avoid Cryptomus retry storm (or choose 500 if you want retries)
+        # 200 => Cryptomus кайра-кайра жиберип тынчтыкты албайт
         return JSONResponse({"ok": True}, status_code=200)
     except Exception as e:
         log.exception("Webhook crash: %s", e)
@@ -331,7 +338,7 @@ async def cryptomus_webhook(req: Request):
 
 
 # =========================================================
-# Global error handler (optional but nice)
+# Global error handler
 # =========================================================
 @app.exception_handler(Exception)
 async def all_exception_handler(request: Request, exc: Exception):
