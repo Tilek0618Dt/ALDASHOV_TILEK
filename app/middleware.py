@@ -1,4 +1,4 @@
-from future import annotations
+from __future__ import annotations
 
 import datetime as dt
 from contextlib import suppress
