@@ -1,4 +1,4 @@
-from future import annotations
+from __future__ import annotations
 
 import datetime as dt
 from typing import Optional
@@ -31,7 +31,7 @@ def utcnow() -> dt.datetime:
 # User
 # =========================
 class User(Base):
-    tablename = "users"
+    __tablename__ = "users"
 
     # internal id
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -86,7 +86,7 @@ class User(Base):
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
-    table_args = (
+    __table_args__ = (
         Index("ix_users_plan", "plan"),
         Index("ix_users_country_code", "country_code"),
     )
@@ -127,7 +127,7 @@ class Invoice(Base):
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     paid_at: Mapped[Optional[dt.datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    table_args = (
+    __table_args__ = (
         Index("ix_invoices_status", "status"),
         Index("ix_invoices_kind", "kind"),
     )
@@ -137,7 +137,7 @@ class Invoice(Base):
 # Optional: Admin logs
 # =========================
 class AdminLog(Base):
-    tablename = "admin_logs"
+    __tablename__ = "admin_logs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     admin_tg_id: Mapped[int] = mapped_column(Integer, index=True)
@@ -149,7 +149,7 @@ class AdminLog(Base):
 
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
-    table_args = (
+    __table_args__ = (
         Index("ix_admin_logs_action", "action"),
     )
 
