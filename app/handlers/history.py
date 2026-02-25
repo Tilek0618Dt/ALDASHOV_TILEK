@@ -1,5 +1,5 @@
 # app/handlers/history.py
-from future import annotations
+from __future__ import annotations
 
 from aiogram import Router, F
 from aiogram.types import CallbackQuery
