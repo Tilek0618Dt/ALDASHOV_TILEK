@@ -1,5 +1,5 @@
 # app/handlers/start.py
-from future import annotations
+from __future__ import annotations
 
 from aiogram import Router, F
 from aiogram.filters import CommandStart
